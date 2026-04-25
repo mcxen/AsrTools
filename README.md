@@ -51,10 +51,6 @@
 
 ###  **2. 从源码安装（开发者）**
 
-项目的依赖仅仅为 `requests`。
-
-如果您需要 GUI 界面，请额外安装 `PyQt5`, `qfluentwidgets`。
-
 如果您想从源码运行，请按照以下步骤操作：
 
 1. **克隆仓库并进入项目目录**
@@ -71,6 +67,20 @@
         ```bash
         pip install -r requirements.txt
         python asr_gui.py
+        ```
+
+    - **macOS 额外依赖**
+
+        视频转音频依赖 `ffmpeg`。如果需要导入视频、`ogg`、`aac`、`wma` 等需要转换的媒体格式，请先安装：
+
+        ```bash
+        brew install ffmpeg
+        ```
+
+        如果 `ffmpeg` 不在 `PATH` 中，可以通过环境变量指定：
+
+        ```bash
+        ASRTOOLS_FFMPEG_PATH=/path/to/ffmpeg python asr_gui.py
         ```
 ---
 

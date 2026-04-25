@@ -2,26 +2,47 @@ import logging
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
+from typing import Optional
 import webbrowser
 
-# FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH 
-plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
-os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
+IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
+
+
+def configure_qt_plugin_path():
+    """Only apply the Windows PyQt plugin path workaround on Windows."""
+    if not IS_WINDOWS:
+        return
+
+    # FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18
+    plugin_path = Path(sys.prefix) / "Lib" / "site-packages" / "PyQt5" / "Qt5" / "plugins"
+    if plugin_path.exists():
+        os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(plugin_path))
+
+
+configure_qt_plugin_path()
 
 from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, \
-    pyqtSignal
-from PyQt5.QtGui import QCursor, QColor, QFont
+    pyqtSignal, QUrl
+from PyQt5.QtGui import QCursor, QColor, QFont, QDesktopServices
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
                              QTableWidgetItem, QHeaderView, QSizePolicy)
-from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
+from qfluentwidgets import (CheckBox, ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
                             Action, RoundMenu, InfoBar, InfoBarPosition,
                             FluentWindow, BodyLabel, MessageBox)
 
 from bk_asr.BcutASR import BcutASR
 from bk_asr.JianYingASR import JianYingASR
 from bk_asr.KuaiShouASR import KuaiShouASR
+
+AUDIO_EXTS = ('.mp3', '.wav', '.flac', '.m4a')
+SUPPORTED_MEDIA_FORMATS = (
+    '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma',
+    '.mp4', '.avi', '.mov', '.ts', '.mkv', '.wmv', '.flv', '.webm', '.rmvb'
+)
 
 # 设置日志配置
 logging.basicConfig(
@@ -35,16 +56,23 @@ class WorkerSignals(QObject):
     errno = Signal(str, str)
 
 
+class AppSettings:
+    def __init__(self):
+        self.keep_converted_mp3 = False
+
+
 class ASRWorker(QRunnable):
     """ASR处理工作线程"""
-    def __init__(self, file_path, asr_engine, export_format):
+    def __init__(self, file_path, asr_engine, export_format, keep_converted_mp3=False):
         super().__init__()
         self.file_path = file_path
         self.asr_engine = asr_engine
         self.export_format = export_format
+        self.keep_converted_mp3 = keep_converted_mp3
         self.signals = WorkerSignals()
 
         self.audio_path = None
+        self.converted_audio_path = None
 
     @Slot()
     def run(self):
@@ -52,13 +80,13 @@ class ASRWorker(QRunnable):
             use_cache = True
             
             # 检查文件类型,如果不是音频则转换
-            logging.info("[+]正在进ffmpeg转换")
-            audio_exts = ['.mp3', '.wav']
-            if not any(self.file_path.lower().endswith(ext) for ext in audio_exts):
+            if not self.file_path.lower().endswith(AUDIO_EXTS):
+                logging.info("[+]正在进行ffmpeg转换")
                 temp_audio = self.file_path.rsplit(".", 1)[0] + ".mp3"
                 if not video2audio(self.file_path, temp_audio):
                     raise Exception("音频转换失败，确保安装ffmpeg")
                 self.audio_path = temp_audio
+                self.converted_audio_path = temp_audio
             else:
                 self.audio_path = self.file_path
             
@@ -96,6 +124,18 @@ class ASRWorker(QRunnable):
         except Exception as e:
             logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
             self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
+        finally:
+            self.cleanup_converted_audio()
+
+    def cleanup_converted_audio(self):
+        if self.keep_converted_mp3 or not self.converted_audio_path:
+            return
+
+        try:
+            Path(self.converted_audio_path).unlink(missing_ok=True)
+            logging.info(f"已删除转换中间文件: {self.converted_audio_path}")
+        except OSError as e:
+            logging.warning(f"删除转换中间文件失败 {self.converted_audio_path}: {e}")
 
 class UpdateCheckerThread(QThread):
     msg = pyqtSignal(str, str, str)  # 用于发送消息的信号
@@ -124,8 +164,9 @@ class UpdateCheckerThread(QThread):
 class ASRWidget(QWidget):
     """ASR处理界面"""
 
-    def __init__(self):
+    def __init__(self, settings):
         super().__init__()
+        self.settings = settings
         self.init_ui()
         self.max_threads = 3  # 设置最大线程数
         self.thread_pool = QThreadPool()
@@ -194,7 +235,7 @@ class ASRWidget(QWidget):
     def select_file(self):
         """选择文件对话框"""
         files, _ = QFileDialog.getOpenFileNames(self, "选择音频或视频文件", "",
-                                                "Media Files (*.mp3 *.wav *.ogg *.mp4 *.avi *.mov *.ts)")
+                                                "Media Files (*.mp3 *.wav *.ogg *.flac *.aac *.m4a *.wma *.mp4 *.avi *.mov *.ts *.mkv *.wmv *.flv *.webm *.rmvb)")
         for file in files:
             self.add_file_to_table(file)
         self.update_start_button_state()
@@ -272,12 +313,9 @@ class ASRWidget(QWidget):
                 file_path = current_item.data(Qt.UserRole)
                 directory = os.path.dirname(file_path)
                 try:
-                    if platform.system() == "Windows":
-                        os.startfile(directory)
-                    elif platform.system() == "Darwin":
-                        subprocess.Popen(["open", directory])
-                    else:
-                        subprocess.Popen(["xdg-open", directory])
+                    opened = QDesktopServices.openUrl(QUrl.fromLocalFile(directory))
+                    if not opened:
+                        raise RuntimeError(f"无法打开目录: {directory}")
                 except Exception as e:
                     InfoBar.error(
                         title='无法打开目录',
@@ -332,7 +370,12 @@ class ASRWidget(QWidget):
         """处理单个文件"""
         selected_engine = self.combo_box.currentText()
         selected_format = self.format_combo.currentText()
-        worker = ASRWorker(file_path, selected_engine, selected_format)
+        worker = ASRWorker(
+            file_path,
+            selected_engine,
+            selected_format,
+            keep_converted_mp3=self.settings.keep_converted_mp3,
+        )
         worker.signals.finished.connect(self.update_table)
         worker.signals.errno.connect(self.handle_error)
         self.thread_pool.start(worker)
@@ -414,18 +457,46 @@ class ASRWidget(QWidget):
 
     def dropEvent(self, event):
         """拖拽释放事件"""
-        supported_formats = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma',  # 音频格式
-                           '.mp4', '.avi', '.mov', '.ts', '.mkv', '.wmv', '.flv', '.webm', '.rmvb')  # 视频格式
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         for file in files:
             if os.path.isdir(file):
                 for root, dirs, files_in_dir in os.walk(file):
                     for f in files_in_dir:
-                        if f.lower().endswith(supported_formats):
+                        if f.lower().endswith(SUPPORTED_MEDIA_FORMATS):
                             self.add_file_to_table(os.path.join(root, f))
-            elif file.lower().endswith(supported_formats):
+            elif file.lower().endswith(SUPPORTED_MEDIA_FORMATS):
                 self.add_file_to_table(file)
         self.update_start_button_state()
+
+
+class SettingsWidget(QWidget):
+    """设置界面"""
+
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(12)
+
+        title_label = BodyLabel("设置", self)
+        title_label.setFont(QFont(get_default_font_family(), 24, QFont.Bold))
+        layout.addWidget(title_label)
+
+        self.keep_mp3_checkbox = CheckBox("保留视频转换后的 MP3 文件", self)
+        self.keep_mp3_checkbox.setChecked(self.settings.keep_converted_mp3)
+        self.keep_mp3_checkbox.stateChanged.connect(self.update_keep_converted_mp3)
+        layout.addWidget(self.keep_mp3_checkbox)
+
+        desc_label = BodyLabel("关闭时，视频或非 MP3/WAV/FLAC/M4A 音频处理完成后会自动删除中间 MP3。", self)
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+
+    def update_keep_converted_mp3(self, state):
+        self.settings.keep_converted_mp3 = state == Qt.Checked
 
 
 class InfoWidget(QWidget):
@@ -451,13 +522,13 @@ class InfoWidget(QWidget):
 
         # 标题
         title_label = BodyLabel("  ASRTools", self)
-        title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
+        title_label.setFont(QFont(get_default_font_family(), 30, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
 
         # 仓库描述区域
         desc_label = BodyLabel(REPO_DESCRIPTION, self)
-        desc_label.setFont(QFont("Segoe UI", 12))
+        desc_label.setFont(QFont(get_default_font_family(), 12))
         main_layout.addWidget(desc_label)
 
         github_button = PushButton("GitHub 仓库", self)
@@ -473,11 +544,17 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('ASR Processing Tool')
+        self.settings = AppSettings()
 
         # ASR 处理界面
-        self.asr_widget = ASRWidget()
+        self.asr_widget = ASRWidget(self.settings)
         self.asr_widget.setObjectName("main")
         self.addSubInterface(self.asr_widget, FIF.ALBUM, 'ASR Processing')
+
+        # 设置界面
+        self.settings_widget = SettingsWidget(self.settings)
+        self.settings_widget.setObjectName("settings")
+        self.addSubInterface(self.settings_widget, FIF.SETTING, '设置')
 
         # 个人信息界面
         self.info_widget = InfoWidget()
@@ -486,6 +563,8 @@ class MainWindow(FluentWindow):
 
         self.navigationInterface.setExpandWidth(200)
         self.resize(800, 600)
+        if IS_MACOS:
+            self.setMinimumSize(760, 560)
 
         self.update_checker = UpdateCheckerThread(self)
         self.update_checker.msg.connect(self.show_msg)
@@ -498,15 +577,59 @@ class MainWindow(FluentWindow):
         if title == "更新":
             sys.exit(0)
 
+def get_default_font_family() -> str:
+    if IS_MACOS:
+        return "PingFang SC"
+    if IS_WINDOWS:
+        return "Microsoft YaHei UI"
+    return "Noto Sans CJK SC"
+
+
+def app_base_dir() -> Path:
+    """Return a useful base path for source runs and PyInstaller bundles."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def find_ffmpeg() -> Optional[str]:
+    """Find ffmpeg from env, PATH, or common bundled locations."""
+    env_path = os.getenv("ASRTOOLS_FFMPEG_PATH")
+    if env_path and Path(env_path).is_file():
+        return env_path
+
+    candidates = [
+        shutil.which("ffmpeg"),
+        app_base_dir() / "ffmpeg",
+        app_base_dir() / "bin" / "ffmpeg",
+        app_base_dir().parent / "Frameworks" / "ffmpeg",
+        app_base_dir() / "_internal" / "ffmpeg",
+        Path(getattr(sys, "_MEIPASS", app_base_dir())) / "ffmpeg",
+        Path(getattr(sys, "_MEIPASS", app_base_dir())) / "bin" / "ffmpeg",
+        Path(getattr(sys, "_MEIPASS", app_base_dir())) / "_internal" / "ffmpeg",
+    ]
+
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(candidate)
+    return None
+
+
 def video2audio(input_file: str, output: str = "") -> bool:
     """使用ffmpeg将视频转换为音频"""
+    ffmpeg_bin = find_ffmpeg()
+    if not ffmpeg_bin:
+        raise RuntimeError(
+            "未找到ffmpeg。macOS可执行 `brew install ffmpeg`，或设置 ASRTOOLS_FFMPEG_PATH 指向ffmpeg可执行文件。"
+        )
+
     # 创建output目录
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output = str(output)
 
     cmd = [
-        'ffmpeg',
+        ffmpeg_bin,
         '-i', input_file,
         '-ac', '1',
         '-f', 'mp3',
