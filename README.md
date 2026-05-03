@@ -42,11 +42,11 @@
 
 ###  **1. 从发布版本安装**
 
-我为 Windows 用户提供了打包好的[Release](https://github.com/WEIFENG2333/AsrTools/releases)版本，下载后解压即可直接使用，无需配置环境。
+我为 Windows 和 macOS 用户提供了打包好的 [Release](https://github.com/WEIFENG2333/AsrTools/releases) 版本，下载后即可直接使用，无需配置 Python 环境。
 
 或者从网盘下载： [https://wwwm.lanzoue.com/iUJYZ2clk7xg](https://wwwm.lanzoue.com/iPKZV2eh5ina)
 
-运行解压后的 `AsrTools.exe`，即可启动 GUI 界面。
+Windows 用户运行解压后的 `AsrTools.exe`，macOS 用户打开 `AsrTools-mac-arm64.dmg` 并运行 `AsrTools.app`，即可启动 GUI 界面。
 
 
 ###  **2. 从源码安装（开发者）**
@@ -85,6 +85,7 @@
 ---
 
 ## 日志
+-  **（v1.2.0）增加 macOS 支持和转换文件清理设置**：支持 macOS arm64 打包版本，并在“设置”页面增加“保留视频转换后的 MP3 文件”选项。默认会在处理完成后删除视频或非 MP3/WAV/FLAC/M4A 音频转换产生的中间 MP3 文件。
 -  **（v1.1.0）已经增加视频文件支持🎥**：支持直接导入视频文件，自动转换为音频进行处理，无需手动转换。
 
 ## 📬 **联系与支持**
